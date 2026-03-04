@@ -219,14 +219,24 @@ def analyze():
         file_content = file.read()
         file_base64 = base64.b64encode(file_content).decode('utf-8')
         
-        # Determine media type
-        filename = file.filename.lower()
-        if filename.endswith('.pdf'):
-            media_type = 'application/pdf'
-        elif filename.endswith('.docx'):
-            media_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        else:
-            return jsonify({'error': 'Unsupported file type'}), 400
+        # Determine media type - check content first, then filename
+file_content = file.read()
+file.seek(0)  # Reset file pointer after reading
+
+# Check file magic bytes to determine actual type
+if file_content[:4] == b'%PDF':
+    media_type = 'application/pdf'
+elif file_content[:2] == b'PK':  # DOCX files are ZIP format
+    media_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+else:
+    # Fallback to filename if we have it
+    filename = file.filename.lower() if file.filename else ''
+    if '.pdf' in filename or filename.endswith('.pdf'):
+        media_type = 'application/pdf'
+    elif '.docx' in filename or filename.endswith('.docx'):
+        media_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    else:
+        return jsonify({'error': 'Unsupported file type - only PDF and DOCX allowed'}), 400
         
         # Call Anthropic API
         client = anthropic.Anthropic(api_key=api_key)
