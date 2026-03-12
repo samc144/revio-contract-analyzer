@@ -237,7 +237,11 @@ def analyze():
             return jsonify({'error': f'Failed to read PDF: {str(e)}'}), 400
         
         # Call OpenAI API
-        client = OpenAI(api_key=api_key)
+        import httpx
+        client = OpenAI(
+            api_key=api_key,
+            http_client=httpx.Client()
+        )
         
         prompt = f"""You are an expert quantity surveyor reviewing this contract for a UK contractor.
 
