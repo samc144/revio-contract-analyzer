@@ -1,16 +1,18 @@
 """
-Revio Contract Review API - Production Version
+Revio Contract Review API - OpenAI Version
 Generates Excel contract risk analysis reports
 """
 
 from flask import Flask, request, jsonify, send_file
-import anthropic
+from openai import OpenAI
 import base64
 import os
 import json
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import pdfplumber
+from io import BytesIO
 
 app = Flask(__name__)
 
@@ -198,7 +200,7 @@ def create_excel_report(analysis_data, project_name, contract_type, filename):
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'service': 'Revio Contract Analyzer'}), 200
+    return jsonify({'status': 'healthy', 'service': 'Revio Contract Analyzer (OpenAI)'}), 200
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
@@ -215,58 +217,51 @@ def analyze():
         if not file:
             return jsonify({'error': 'Contract file required'}), 400
         
-       # Read file once
+        # Read file
         file_content = file.read()
-        file.seek(0)  # Reset for potential re-reading
+        file.seek(0)
         
-        # Determine media type - check content first, then filename
-        # Check file magic bytes to determine actual type
-        if file_content[:4] == b'%PDF':
-            media_type = 'application/pdf'
-        elif file_content[:2] == b'PK':  # DOCX files are ZIP format
-            media_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        else:
-            # Fallback to filename if we have it
-            filename = file.filename.lower() if file.filename else ''
-            if '.pdf' in filename or filename.endswith('.pdf'):
-                media_type = 'application/pdf'
-            elif '.docx' in filename or filename.endswith('.docx'):
-                media_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-            else:
-                return jsonify({'error': 'Unsupported file type - only PDF and DOCX allowed'}), 400
+        # Extract text from PDF
+        try:
+            with pdfplumber.open(BytesIO(file_content)) as pdf:
+                contract_text = ""
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        contract_text += page_text + "\n\n"
+                
+                if not contract_text.strip():
+                    return jsonify({'error': 'Could not extract text from PDF. Please ensure it is not scanned/image-based.'}), 400
+                    
+        except Exception as e:
+            return jsonify({'error': f'Failed to read PDF: {str(e)}'}), 400
         
-        # Encode for API
-        file_base64 = base64.b64encode(file_content).decode('utf-8')
-        # Call Anthropic API
-        client = anthropic.Anthropic(api_key=api_key)
+        # Call OpenAI API
+        client = OpenAI(api_key=api_key)
         
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=8000,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "document", "source": {"type": "base64", "media_type": media_type, "data": file_base64}},
-                    {"type": "text", "text": """You are an expert quantity surveyor reviewing this contract for a UK contractor.
+        prompt = f"""You are an expert quantity surveyor reviewing this contract for a UK contractor.
 
 CRITICAL: Respond ONLY with valid JSON. No markdown, no code blocks, no extra text.
 
+CONTRACT TEXT:
+{contract_text}
+
 Provide comprehensive risk analysis in this JSON format:
 
-{
+{{
   "overall_rating": "HIGH (4.1/5) - Brief description",
   "risk_distribution": [
-    {"level": "CRITICAL (5)", "count": 6, "percentage": "16%", "examples": "Brief examples"},
-    {"level": "HIGH (4)", "count": 11, "percentage": "29%", "examples": "Brief examples"},
-    {"level": "MEDIUM-HIGH (3)", "count": 14, "percentage": "37%", "examples": "Brief examples"},
-    {"level": "MEDIUM (2)", "count": 7, "percentage": "18%", "examples": "Brief examples"},
-    {"level": "LOW (1)", "count": 0, "percentage": "0%", "examples": "None"}
+    {{"level": "CRITICAL (5)", "count": 6, "percentage": "16%", "examples": "Brief examples"}},
+    {{"level": "HIGH (4)", "count": 11, "percentage": "29%", "examples": "Brief examples"}},
+    {{"level": "MEDIUM-HIGH (3)", "count": 14, "percentage": "37%", "examples": "Brief examples"}},
+    {{"level": "MEDIUM (2)", "count": 7, "percentage": "18%", "examples": "Brief examples"}},
+    {{"level": "LOW (1)", "count": 0, "percentage": "0%", "examples": "None"}}
   ],
   "critical_issues": [
-    {"risk_id": "R001", "issue": "Short description", "clause": "Reference", "action": "Required action"}
+    {{"risk_id": "R001", "issue": "Short description", "clause": "Reference", "action": "Required action"}}
   ],
   "risks": [
-    {
+    {{
       "risk_id": "R001",
       "category": "Liability/Payment/Termination/etc",
       "clause_ref": "Clause reference",
@@ -275,18 +270,18 @@ Provide comprehensive risk analysis in this JSON format:
       "rating": 5,
       "risk_level": "CRITICAL",
       "mitigation": "Specific mitigation steps"
-    }
+    }}
   ],
   "key_particulars": [
-    {
+    {{
       "element": "Payment Terms/Working Hours/etc",
       "detail": "Specific details",
       "action": "What contractor must do",
       "reference": "Clause reference",
       "notes": "Additional notes"
-    }
+    }}
   ]
-}
+}}
 
 Requirements:
 - Identify 20-40+ risks minimum
@@ -296,13 +291,20 @@ Requirements:
 - Provide actionable mitigation
 - Include key contract particulars
 
-REMEMBER: ONLY JSON. No other text."""}
-                ]
+REMEMBER: ONLY JSON. No other text."""
+
+        response = client.chat.completions.create(
+            model="gpt-4o",  # Latest and best GPT-4 model
+            max_tokens=16000,
+            temperature=0.3,
+            messages=[{
+                "role": "user",
+                "content": prompt
             }]
         )
         
         # Parse response
-        response_text = message.content[0].text.strip()
+        response_text = response.choices[0].message.content.strip()
         
         # Clean up response if it has code blocks
         if response_text.startswith('```'):
@@ -329,10 +331,6 @@ REMEMBER: ONLY JSON. No other text."""}
             download_name=excel_filename
         )
         
-    except anthropic.AuthenticationError:
-        return jsonify({'error': 'Invalid API key'}), 401
-    except anthropic.PermissionDeniedError:
-        return jsonify({'error': 'No credits. Add funds to your account'}), 403
     except json.JSONDecodeError as e:
         return jsonify({'error': f'Failed to parse AI response: {str(e)}'}), 500
     except Exception as e:
@@ -341,7 +339,7 @@ REMEMBER: ONLY JSON. No other text."""}
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print("\n" + "="*60)
-    print("🏗️  Revio Contract Risk Analyzer API")
+    print("🏗️  Revio Contract Risk Analyzer API (OpenAI)")
     print("="*60)
     print(f"\nServer starting on port {port}...")
     print("\n📍 Server ready to receive requests")
